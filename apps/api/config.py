@@ -1,0 +1,277 @@
+"""
+Configuration Management for Diet Planner API
+Implements secure configuration management for different environments
+"""
+
+import os
+from datetime import timedelta
+from typing import Dict, Any
+from dotenv import load_dotenv
+
+
+class BaseConfig:
+    """Base configuration with common settings"""
+    
+    # Load environment variables
+    load_dotenv()
+    
+    # Application Environment
+    APP_ENV = os.getenv('APP_ENV', 'development')
+    
+    # Basic Flask Configuration
+    SECRET_KEY = os.getenv('FLASK_SECRET_KEY') or 'dev-secret-key-change-in-production'
+    DEBUG = False  # Override in DevelopmentConfig
+    TESTING = False
+    
+    # File Upload Configuration
+    MAX_CONTENT_LENGTH = 1 * 1024 * 1024  # 1MB as specified
+    
+    # Database Configuration
+    POSTGRES_HOST = os.getenv('POSTGRES_HOST', 'localhost')
+    POSTGRES_PORT = os.getenv('POSTGRES_PORT', '5432')
+    POSTGRES_DB = os.getenv('POSTGRES_DB', 'diet_planner')
+    POSTGRES_USER = os.getenv('POSTGRES_USER', 'diet_user')
+    POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'diet_password')
+    
+    SQLALCHEMY_DATABASE_URI = (
+        f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@"
+        f"{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
+    )
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'pool_size': 10,
+        'pool_recycle': 3600,
+        'pool_pre_ping': True
+    }
+    
+    # JWT Configuration
+    JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY') or 'jwt-secret-change-in-production'
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)
+    JWT_ALGORITHM = 'HS256'
+    
+    # AI Configuration
+    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+    GEMINI_MODEL = 'gemini-1.5-flash'
+    
+    # CORS Configuration - from environment
+    CORS_ORIGINS = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:3001,http://localhost:3002').split(',')
+    
+    # Rate Limiting Configuration
+    RATELIMIT_STORAGE_URL = os.getenv('REDIS_URL', 'memory://')
+    RATELIMIT_DEFAULT = "1000 per hour"
+    
+    # Security Headers Configuration
+    SECURITY_HEADERS = True
+    
+    # Logging Configuration
+    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+    LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    
+    # Email Configuration (for future features)
+    MAIL_SERVER = os.getenv('MAIL_SERVER')
+    MAIL_PORT = int(os.getenv('MAIL_PORT', 587))
+    MAIL_USE_TLS = os.getenv('MAIL_USE_TLS', 'True').lower() == 'true'
+    MAIL_USERNAME = os.getenv('MAIL_USERNAME')
+    MAIL_PASSWORD = os.getenv('MAIL_PASSWORD')
+    
+    @staticmethod
+    def init_app(app):
+        """Initialize application with configuration"""
+        pass
+
+
+class DevelopmentConfig(BaseConfig):
+    """Development environment configuration"""
+    
+    DEBUG = True
+    TESTING = False
+    
+    # Relaxed security for development
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)
+    
+    # Development-specific logging
+    LOG_LEVEL = 'DEBUG'
+    
+    # Allow insecure cookies for development
+    SESSION_COOKIE_SECURE = False
+    SESSION_COOKIE_HTTPONLY = True
+    
+    @staticmethod
+    def init_app(app):
+        BaseConfig.init_app(app)
+        import logging
+        logging.basicConfig(level=logging.DEBUG)
+
+
+class TestingConfig(BaseConfig):
+    """Testing environment configuration"""
+    
+    TESTING = True
+    DEBUG = True
+    
+    # Use in-memory database for testing
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
+    
+    # Shorter token expiry for testing
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=10)
+    
+    # Disable CSRF for testing
+    WTF_CSRF_ENABLED = False
+    
+    # Testing-specific secrets
+    SECRET_KEY = 'testing-secret-key'
+    JWT_SECRET_KEY = 'testing-jwt-secret'
+    
+    # Disable rate limiting for testing
+    RATELIMIT_ENABLED = False
+    
+    @staticmethod
+    def init_app(app):
+        BaseConfig.init_app(app)
+        import logging
+        logging.disable(logging.CRITICAL)
+
+
+class ProductionConfig(BaseConfig):
+    """Production environment configuration"""
+    
+    DEBUG = False  # Explicitly set to False for production
+    TESTING = False
+    
+    # Strict security for production
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=30)
+    
+    # Secure cookies
+    SESSION_COOKIE_SECURE = True
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Strict'
+    
+    # Production CORS origins (update with your domains)
+    CORS_ORIGINS = os.getenv('CORS_ORIGINS', 'https://your-frontend-domain.com').split(',')
+    
+    # Enhanced logging for production
+    LOG_LEVEL = 'WARNING'
+    
+    # Database connection pooling for production
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'pool_size': 20,
+        'pool_recycle': 3600,
+        'pool_pre_ping': True,
+        'pool_timeout': 30
+    }
+    
+    @staticmethod
+    def init_app(app):
+        BaseConfig.init_app(app)
+        
+        # Production logging setup
+        import logging
+        from logging.handlers import RotatingFileHandler
+        
+        if not app.debug and not app.testing:
+            if not os.path.exists('logs'):
+                os.mkdir('logs')
+            
+            file_handler = RotatingFileHandler(
+                'logs/diet_planner.log', 
+                maxBytes=10240000, 
+                backupCount=10
+            )
+            file_handler.setFormatter(logging.Formatter(
+                '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+            ))
+            file_handler.setLevel(logging.INFO)
+            app.logger.addHandler(file_handler)
+            app.logger.setLevel(logging.INFO)
+            app.logger.info('Diet Planner application startup')
+
+
+class StagingConfig(ProductionConfig):
+    """Staging environment configuration"""
+    
+    DEBUG = False
+    TESTING = False
+    
+    # Similar to production but with relaxed settings for testing
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=2)
+    
+    # Staging-specific CORS origins
+    CORS_ORIGINS = os.getenv('CORS_ORIGINS', 'https://staging-diet-planner.com').split(',')
+    
+    LOG_LEVEL = 'INFO'
+
+
+# Configuration mapping
+config = {
+    'development': DevelopmentConfig,
+    'testing': TestingConfig,
+    'staging': StagingConfig,
+    'production': ProductionConfig,
+    'default': DevelopmentConfig
+}
+
+
+def get_config(environment: str = None) -> BaseConfig:
+    """Get configuration for specified environment"""
+    if environment is None:
+        environment = os.getenv('APP_ENV', 'development')
+    
+    return config.get(environment, config['default'])
+
+
+def validate_config() -> Dict[str, Any]:
+    """Validate critical configuration values"""
+    errors = []
+    warnings = []
+    
+    # Check for required environment variables
+    required_vars = ['GEMINI_API_KEY']
+    
+    for var in required_vars:
+        if not os.getenv(var):
+            errors.append(f"Missing required environment variable: {var}")
+    
+    # Check security settings in production
+    if os.getenv('APP_ENV') == 'production':
+        if os.getenv('FLASK_SECRET_KEY') == 'dev-secret-key-change-in-production':
+            errors.append("Production SECRET_KEY must be changed from default")
+        
+        if os.getenv('JWT_SECRET_KEY') == 'jwt-secret-change-in-production':
+            errors.append("Production JWT_SECRET_KEY must be changed from default")
+        
+        if not os.getenv('POSTGRES_PASSWORD') or os.getenv('POSTGRES_PASSWORD') == 'diet_password':
+            warnings.append("Production database password should be changed from default")
+    
+    # Check database connectivity
+    try:
+        import psycopg2
+        conn_string = (
+            f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
+            f"port={os.getenv('POSTGRES_PORT', '5432')} "
+            f"dbname={os.getenv('POSTGRES_DB', 'diet_planner')} "
+            f"user={os.getenv('POSTGRES_USER', 'diet_user')} "
+            f"password={os.getenv('POSTGRES_PASSWORD', 'diet_password')}"
+        )
+        conn = psycopg2.connect(conn_string)
+        conn.close()
+    except Exception as e:
+        warnings.append(f"Database connection warning: {str(e)}")
+    
+    return {
+        'errors': errors,
+        'warnings': warnings,
+        'status': 'valid' if not errors else 'invalid'
+    }
+
+
+# Export commonly used configurations
+__all__ = [
+    'BaseConfig',
+    'DevelopmentConfig', 
+    'TestingConfig',
+    'ProductionConfig',
+    'StagingConfig',
+    'config',
+    'get_config',
+    'validate_config'
+]

@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: diet_planner_db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-diet_planner}
+      POSTGRES_USER: ${POSTGRES_USER:-diet_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-diet_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - diet_planner_network
+
+  # Python Flask Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: diet_planner_backend
+    environment:
+      - FLASK_APP=app.py
+      - FLASK_ENV=${FLASK_ENV:-development}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-diet_planner}
+      - POSTGRES_USER=${POSTGRES_USER:-diet_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-diet_password}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-dev_secret_key}
+    ports:
+      - "5000:5000"
+    depends_on:
+      - postgres
+    volumes:
+      - ./backend:/app
+    networks:
+      - diet_planner_network
+    restart: unless-stopped
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: diet_planner_frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - diet_planner_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  diet_planner_network:
+    driver: bridge

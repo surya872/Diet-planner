@@ -1,0 +1,64 @@
+# Render.com Deployment Configuration
+# https://render.com/docs/blueprint-spec
+
+services:
+  # Backend API Service
+  - type: web
+    name: diet-planner-backend
+    env: python
+    buildCommand: |
+      cd backend
+      pip install -r requirements.txt
+    startCommand: |
+      cd backend
+      gunicorn --bind 0.0.0.0:$PORT app:app
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: POSTGRES_HOST
+        fromDatabase:
+          name: diet-planner-db
+          property: host
+      - key: POSTGRES_PORT
+        fromDatabase:
+          name: diet-planner-db
+          property: port
+      - key: POSTGRES_DB
+        fromDatabase:
+          name: diet-planner-db
+          property: database
+      - key: POSTGRES_USER
+        fromDatabase:
+          name: diet-planner-db
+          property: user
+      - key: POSTGRES_PASSWORD
+        fromDatabase:
+          name: diet-planner-db
+          property: password
+      - key: GEMINI_API_KEY
+        sync: false  # Set this manually in Render dashboard
+    healthCheckPath: /api/health
+    
+  # Frontend Service
+  - type: web
+    name: diet-planner-frontend
+    env: node
+    buildCommand: |
+      cd frontend
+      npm ci
+      npm run build
+    staticPublishPath: frontend/build
+    envVars:
+      - key: REACT_APP_API_URL
+        value: https://diet-planner-backend.onrender.com/api
+
+# Database
+databases:
+  - name: diet-planner-db
+    databaseName: diet_planner
+    user: diet_user
+    postgresMajorVersion: 15

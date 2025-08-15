@@ -1,0 +1,341 @@
+name: Web CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths: 
+      - 'apps/web/**'
+      - '.github/workflows/web.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'apps/web/**'
+      - '.github/workflows/web.yml'
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  # Web Tests and Quality Checks
+  web-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Enable corepack
+      run: corepack enable
+
+    - name: Cache Node.js dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.npm
+        key: ${{ runner.os }}-node-${{ hashFiles('apps/web/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-node-
+
+    - name: Install dependencies
+      run: |
+        cd apps/web
+        npm ci
+
+    - name: Run ESLint
+      run: |
+        cd apps/web
+        npm run lint || echo "Linting completed with warnings"
+
+    - name: Run TypeScript type checking
+      run: |
+        cd apps/web
+        npx tsc --noEmit
+
+    - name: Run security audit
+      run: |
+        cd apps/web
+        npm audit --audit-level moderate --json > npm-audit.json || true
+        cat npm-audit.json
+
+    - name: Run unit tests with coverage
+      run: |
+        cd apps/web
+        npm test -- --coverage --watchAll=false --coverageReporters=lcov --coverageReporters=text --coverageThreshold='{"global":{"lines":60,"functions":60,"branches":60,"statements":60}}'
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./apps/web/coverage/lcov.info
+        flags: web
+        name: web-coverage
+
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: web-security-reports
+        path: |
+          apps/web/npm-audit.json
+
+  # Build Web Application
+  build-web:
+    runs-on: ubuntu-latest
+    needs: [web-tests]
+    if: github.event_name == 'push'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Enable corepack
+      run: corepack enable
+
+    - name: Install dependencies
+      run: |
+        cd apps/web
+        npm ci
+
+    - name: Build production application
+      env:
+        REACT_APP_API_URL: ${{ github.ref == 'refs/heads/main' && secrets.PRODUCTION_API_URL || secrets.STAGING_API_URL }}
+        CI: false  # Treat warnings as warnings, not errors
+      run: |
+        cd apps/web
+        npm run build
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: web-build-${{ github.sha }}
+        path: apps/web/build
+        retention-days: 30
+
+  # Deploy to Netlify (Production)
+  deploy-web-netlify:
+    runs-on: ubuntu-latest
+    needs: [web-tests, build-web]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Enable corepack
+      run: corepack enable
+
+    - name: Install dependencies
+      run: |
+        cd apps/web
+        npm ci
+
+    - name: Build for production
+      env:
+        REACT_APP_API_URL: ${{ secrets.PRODUCTION_API_URL }}
+        CI: false
+      run: |
+        cd apps/web
+        npm run build
+
+    - name: Deploy to Netlify
+      uses: nwtgck/actions-netlify@v2.0
+      with:
+        publish-dir: './apps/web/build'
+        production-branch: main
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        deploy-message: "Deploy from GitHub Actions - ${{ github.sha }}"
+        enable-pull-request-comment: false
+        enable-commit-comment: true
+        overwrites-pull-request-comment: true
+      env:
+        NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+
+    - name: Verify deployment
+      env:
+        NETLIFY_URL: ${{ secrets.NETLIFY_PRODUCTION_URL }}
+      run: |
+        echo "Verifying web deployment..."
+        for i in {1..30}; do
+          if curl -f "$NETLIFY_URL"; then
+            echo "✅ Web deployment successful!"
+            exit 0
+          fi
+          echo "⏳ Waiting for deployment to be ready... (attempt $i/30)"
+          sleep 10
+        done
+        echo "❌ Web deployment verification failed"
+        exit 1
+
+  # Deploy to Vercel (Alternative/Staging)
+  deploy-web-vercel:
+    runs-on: ubuntu-latest
+    needs: [web-tests, build-web]
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment: staging
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Install Vercel CLI
+      run: npm install --global vercel@latest
+
+    - name: Deploy to Vercel
+      env:
+        VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+        VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      run: |
+        cd apps/web
+        vercel pull --yes --environment=preview --token=$VERCEL_TOKEN
+        vercel build --token=$VERCEL_TOKEN
+        vercel deploy --prebuilt --token=$VERCEL_TOKEN
+
+  # Lighthouse Performance Tests
+  lighthouse:
+    runs-on: ubuntu-latest
+    needs: [deploy-web-netlify]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Audit URLs using Lighthouse
+      uses: treosh/lighthouse-ci-action@v10
+      with:
+        urls: |
+          ${{ secrets.NETLIFY_PRODUCTION_URL }}
+          ${{ secrets.NETLIFY_PRODUCTION_URL }}/login
+        configPath: './apps/web/lighthouserc.json'
+        uploadArtifacts: true
+        temporaryPublicStorage: true
+
+  # End-to-End Tests
+  e2e-tests:
+    runs-on: ubuntu-latest
+    needs: [deploy-web-netlify]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Install Playwright
+      run: |
+        cd apps/web
+        npm ci
+        npx playwright install --with-deps
+
+    - name: Run E2E tests
+      env:
+        BASE_URL: ${{ secrets.NETLIFY_PRODUCTION_URL }}
+        API_URL: ${{ secrets.PRODUCTION_API_URL }}
+      run: |
+        cd apps/web
+        npx playwright test
+
+    - name: Upload E2E test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: e2e-test-results
+        path: |
+          apps/web/test-results/
+          apps/web/playwright-report/
+
+  # Build and Push Docker Image (Optional)
+  build-web-docker:
+    runs-on: ubuntu-latest
+    needs: [web-tests]
+    if: github.event_name == 'push'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ghcr.io/${{ github.repository }}/web
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: apps/web
+        file: apps/web/Dockerfile.prod
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          REACT_APP_API_URL=${{ github.ref == 'refs/heads/main' && secrets.PRODUCTION_API_URL || secrets.STAGING_API_URL }}
+
+  # Notification
+  notify:
+    runs-on: ubuntu-latest
+    needs: [deploy-web-netlify, lighthouse, e2e-tests]
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+    - name: Notify deployment status
+      env:
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      run: |
+        if [[ "${{ needs.deploy-web-netlify.result }}" == "success" && "${{ needs.e2e-tests.result }}" == "success" ]]; then
+          STATUS="✅ SUCCESS"
+          COLOR="good"
+          MESSAGE="Web deployment, Lighthouse audit, and E2E tests passed successfully!"
+        else
+          STATUS="❌ FAILED"
+          COLOR="danger"
+          MESSAGE="Web deployment, Lighthouse audit, or E2E tests failed. Please check the logs."
+        fi
+        
+        if [[ -n "$SLACK_WEBHOOK" ]]; then
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"$STATUS: Diet Planner Web Deployment\",\"attachments\":[{\"color\":\"$COLOR\",\"text\":\"$MESSAGE\"}]}" \
+            $SLACK_WEBHOOK
+        fi

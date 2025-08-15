@@ -1,0 +1,263 @@
+name: API CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths: 
+      - 'apps/api/**'
+      - '.github/workflows/api.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'apps/api/**'
+      - '.github/workflows/api.yml'
+
+env:
+  PYTHON_VERSION: '3.11'
+  POSTGRES_VERSION: '15'
+
+jobs:
+  # API Tests and Quality Checks
+  api-tests:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: diet_planner_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Cache Python dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('apps/api/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install Python dependencies
+      run: |
+        cd apps/api
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Set up environment variables
+      run: |
+        cd apps/api
+        echo "APP_ENV=testing" >> $GITHUB_ENV
+        echo "POSTGRES_HOST=localhost" >> $GITHUB_ENV
+        echo "POSTGRES_DB=diet_planner_test" >> $GITHUB_ENV
+        echo "POSTGRES_USER=test_user" >> $GITHUB_ENV
+        echo "POSTGRES_PASSWORD=test_password" >> $GITHUB_ENV
+        echo "JWT_SECRET_KEY=test-jwt-secret" >> $GITHUB_ENV
+        echo "FLASK_SECRET_KEY=test-secret-key" >> $GITHUB_ENV
+        echo "GEMINI_API_KEY=test-gemini-key" >> $GITHUB_ENV
+
+    - name: Run code quality checks
+      run: |
+        cd apps/api
+        flake8 app.py tests/ config.py security.py monitoring.py
+        black --check app.py tests/ config.py security.py monitoring.py
+        isort --check-only app.py tests/ config.py security.py monitoring.py
+
+    - name: Run type checking
+      run: |
+        cd apps/api
+        mypy app.py config.py security.py monitoring.py --ignore-missing-imports
+
+    - name: Run security scans
+      run: |
+        cd apps/api
+        safety check
+        bandit -r app.py config.py security.py monitoring.py -f json -o bandit-report.json || true
+        pip-audit --desc --format=json --output=pip-audit-report.json || true
+
+    - name: Run unit tests with coverage
+      run: |
+        cd apps/api
+        pytest tests/ -v --cov=app --cov=config --cov=security --cov=monitoring --cov-report=xml --cov-report=term-missing --cov-fail-under=70
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./apps/api/coverage.xml
+        flags: api
+        name: api-coverage
+
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: api-security-reports
+        path: |
+          apps/api/bandit-report.json
+          apps/api/pip-audit-report.json
+
+  # Build and Push Docker Image
+  build-api:
+    runs-on: ubuntu-latest
+    needs: [api-tests]
+    if: github.event_name == 'push'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ghcr.io/${{ github.repository }}/api
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: apps/api
+        file: apps/api/Dockerfile.prod
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Deploy to Render (Production)
+  deploy-api-render:
+    runs-on: ubuntu-latest
+    needs: [api-tests, build-api]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+    - name: Deploy to Render
+      env:
+        RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        RENDER_SERVICE_ID: ${{ secrets.RENDER_API_SERVICE_ID }}
+      run: |
+        echo "Deploying API to Render production environment..."
+        curl -X POST "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" \
+          -H "Authorization: Bearer $RENDER_API_KEY" \
+          -H "Content-Type: application/json" \
+          -d '{"clearCache": false}'
+
+    - name: Verify deployment
+      env:
+        RENDER_API_URL: ${{ secrets.RENDER_API_URL }}
+      run: |
+        echo "Verifying API deployment..."
+        for i in {1..30}; do
+          if curl -f "$RENDER_API_URL/api/health"; then
+            echo "✅ API deployment successful!"
+            exit 0
+          fi
+          echo "⏳ Waiting for deployment to be ready... (attempt $i/30)"
+          sleep 10
+        done
+        echo "❌ API deployment verification failed"
+        exit 1
+
+  # Deploy to Staging (Develop branch)
+  deploy-api-staging:
+    runs-on: ubuntu-latest
+    needs: [api-tests, build-api]
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment: staging
+
+    steps:
+    - name: Deploy to Render Staging
+      env:
+        RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        RENDER_STAGING_SERVICE_ID: ${{ secrets.RENDER_API_STAGING_SERVICE_ID }}
+      run: |
+        echo "Deploying API to Render staging environment..."
+        curl -X POST "https://api.render.com/v1/services/$RENDER_STAGING_SERVICE_ID/deploys" \
+          -H "Authorization: Bearer $RENDER_API_KEY" \
+          -H "Content-Type: application/json" \
+          -d '{"clearCache": false}'
+
+  # Integration Tests (Post-deployment)
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: [deploy-api-render]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install test dependencies
+      run: |
+        cd apps/api
+        pip install pytest requests
+
+    - name: Run integration tests against production
+      env:
+        API_BASE_URL: ${{ secrets.RENDER_API_URL }}
+      run: |
+        cd apps/api
+        # Run integration tests against the deployed API
+        python -m pytest tests/integration/ -v --tb=short
+
+  # Notification
+  notify:
+    runs-on: ubuntu-latest
+    needs: [deploy-api-render, integration-tests]
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+    - name: Notify deployment status
+      env:
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      run: |
+        if [[ "${{ needs.deploy-api-render.result }}" == "success" && "${{ needs.integration-tests.result }}" == "success" ]]; then
+          STATUS="✅ SUCCESS"
+          COLOR="good"
+          MESSAGE="API deployment and integration tests passed successfully!"
+        else
+          STATUS="❌ FAILED"
+          COLOR="danger"
+          MESSAGE="API deployment or integration tests failed. Please check the logs."
+        fi
+        
+        if [[ -n "$SLACK_WEBHOOK" ]]; then
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"$STATUS: Diet Planner API Deployment\",\"attachments\":[{\"color\":\"$COLOR\",\"text\":\"$MESSAGE\"}]}" \
+            $SLACK_WEBHOOK
+        fi

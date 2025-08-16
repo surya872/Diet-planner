@@ -19,6 +19,9 @@ RUN pip install --no-cache-dir -r requirements.prod.txt
 # Copy backend application code
 COPY backend/ .
 
+# Create necessary directories
+RUN mkdir -p logs && chmod 755 logs
+
 # Create startup script
 RUN chmod +x start-render.sh
 

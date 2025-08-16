@@ -17,8 +17,10 @@ from security import SecurityManager, configure_security
 from monitoring import setup_monitoring
 
 # Get environment-specific configuration
-environment = os.getenv('FLASK_ENV', 'development')
+environment = os.getenv('APP_ENV', os.getenv('FLASK_ENV', 'development'))
 config_class = get_config(environment)
+print(f"🔧 Using environment: {environment}")
+print(f"🔧 Config class: {config_class.__name__}")
 
 # Create Flask app with configuration
 app = Flask(__name__)

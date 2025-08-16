@@ -9,9 +9,12 @@ RUN apt-get update && apt-get install -y \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
+# Upgrade pip first to avoid dependency resolution issues
+RUN pip install --upgrade pip
+
 # Copy backend requirements and install dependencies
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY backend/requirements.prod.txt .
+RUN pip install --no-cache-dir -r requirements.prod.txt
 
 # Copy backend application code
 COPY backend/ .

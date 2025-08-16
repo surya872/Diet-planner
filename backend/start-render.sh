@@ -3,6 +3,13 @@
 # Render startup script for Diet Planner API
 echo "🚀 Starting Diet Planner API on Render..."
 
+# Debug environment variables
+echo "🔍 Environment Debug:"
+echo "APP_ENV: ${APP_ENV:-NOT_SET}"
+echo "FLASK_ENV: ${FLASK_ENV:-NOT_SET}" 
+echo "DATABASE_URL: ${DATABASE_URL:0:50}..." # Show first 50 chars only
+echo "PORT: ${PORT:-NOT_SET}"
+
 # Set environment variables
 export PYTHONPATH=/app:$PYTHONPATH
 export FLASK_APP=app.py

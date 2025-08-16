@@ -289,6 +289,10 @@ def setup_monitoring(app: Flask):
         from logging.handlers import RotatingFileHandler
         
         if not app.config.get('TESTING'):
+            # Create logs directory if it doesn't exist
+            import os
+            os.makedirs('logs', exist_ok=True)
+            
             file_handler = RotatingFileHandler(
                 'logs/diet_planner.log', 
                 maxBytes=10240000, 
